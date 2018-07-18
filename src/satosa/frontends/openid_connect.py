@@ -125,7 +125,12 @@ class OpenIDConnectFrontend(FrontendModule):
         auth_req = self._get_authn_request_from_state(context.state)
 
         attributes = self.converter.from_internal("openid", internal_resp.attributes)
-        self.user_db[internal_resp.user_id] = {k: v[0] for k, v in attributes.items()}
+
+        _userinfo = {}
+        for k, v in attributes.items():
+            _userinfo[k] = ' '.join(v)
+        self.user_db[internal_resp.user_id] = _userinfo
+        
         auth_resp = self.provider.authorize(auth_req, internal_resp.user_id, extra_id_token_claims)
 
         del context.state[self.name]
