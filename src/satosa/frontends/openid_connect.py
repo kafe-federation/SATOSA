@@ -1,6 +1,7 @@
 """
 A OpenID Connect frontend module for the satosa proxy
 """
+from pprint import pprint
 import json
 import logging
 from urllib.parse import urlencode, urlparse
@@ -31,7 +32,6 @@ from ..util import rndstr
 
 logger = logging.getLogger(__name__)
 
-
 def oidc_subject_type_to_hash_type(subject_type):
     if subject_type == "public":
         return UserIdHashType.public
@@ -52,9 +52,16 @@ class OpenIDConnectFrontend(FrontendModule):
         self.signing_key = RSAKey(key=rsa_load(conf["signing_key_path"]), use="sig", alg="RS256")
 
     def _create_provider(self, endpoint_baseurl):
+        db_uri = self.config.get("db_uri")
+        cdb = MongoWrapper(db_uri, "satosa", "clients") if db_uri else {}
+        self.user_db = MongoWrapper(db_uri, "satosa", "authz_codes") if db_uri else {}
+
         response_types_supported = self.config["provider"].get("response_types_supported", ["id_token"])
         subject_types_supported = self.config["provider"].get("subject_types_supported", ["pairwise"])
         scopes_supported = self.config["provider"].get("scopes_supported", ["openid"])
+
+        clireg = self.config["provider"].get("client_registration_supported", False)
+
         capabilities = {
             "issuer": self.base_url,
             "authorization_endpoint": "{}/{}".format(endpoint_baseurl, AuthorizationEndpoint.url),
@@ -73,23 +80,10 @@ class OpenIDConnectFrontend(FrontendModule):
             "scopes_supported": scopes_supported
         }
 
-        if 'code' in response_types_supported:
-            capabilities["token_endpoint"] = "{}/{}".format(endpoint_baseurl, TokenEndpoint.url)
-
         if self.config["provider"].get("client_registration_supported", False):
             capabilities["registration_endpoint"] = "{}/{}".format(endpoint_baseurl, RegistrationEndpoint.url)
 
         authz_state = self._init_authorization_state()
-        db_uri = self.config.get("db_uri")
-        cdb_file = self.config.get("client_db_path")
-        if db_uri:
-            cdb = MongoWrapper(db_uri, "satosa", "clients")
-        elif cdb_file:
-            with open(cdb_file) as f:
-                cdb = json.loads(f.read())
-        else:
-            cdb = {}
-        self.user_db = MongoWrapper(db_uri, "satosa", "authz_codes") if db_uri else {}
         self.provider = Provider(self.signing_key, capabilities, authz_state, cdb, Userinfo(self.user_db))
 
     def _init_authorization_state(self):
@@ -121,16 +115,30 @@ class OpenIDConnectFrontend(FrontendModule):
         :type internal_response: satosa.internal_data.InternalResponse
         :rtype oic.utils.http_util.Response
         """
-
+       
         auth_req = self._get_authn_request_from_state(context.state)
 
         attributes = self.converter.from_internal("openid", internal_resp.attributes)
-
+   
+        ### rZone Code Start ###
+        # client에게 허용되는 scope 처리
+        ''' Original Code
+        self.user_db[internal_resp.user_id] = {k: v[0] for k, v in attributes.items()}
+        '''
+        allowed = self.internal_req.approved_attributes
+        allowed_oidc = []
+        for claim_name in allowed:
+            if claim_name in self.internal_attributes['attributes']:
+                if 'openid' in self.internal_attributes['attributes'][claim_name]:
+                    for oidc_attr in self.internal_attributes['attributes'][claim_name]['openid']:
+                        allowed_oidc.append(oidc_attr)
         _userinfo = {}
         for k, v in attributes.items():
-            _userinfo[k] = ' '.join(v)
+            if k in allowed_oidc:
+                _userinfo[k] = ' '.join(v)
         self.user_db[internal_resp.user_id] = _userinfo
-        
+        ### rZone code End ###        
+
         auth_resp = self.provider.authorize(auth_req, internal_resp.user_id, extra_id_token_claims)
 
         del context.state[self.name]
@@ -162,6 +170,7 @@ class OpenIDConnectFrontend(FrontendModule):
         :rtype: list[(str, ((satosa.context.Context, Any) -> satosa.response.Response, Any))]
         :raise ValueError: if more than one backend is configured
         """
+        
         backend_name = None
         if len(backend_names) != 1:
             # only supports one backend since there currently is no way to publish multiple authorization endpoints
@@ -290,6 +299,19 @@ class OpenIDConnectFrontend(FrontendModule):
                 return BadRequest("Something went wrong: {}".format(str(e)))
 
         client_id = authn_req["client_id"]
+        
+        ### rZone Code Start ###
+        # SAML Proxy에서 Consent 연동을 위해 요청하는 scope 처리
+        try:
+            a = self.provider.clients[client_id].get("scope")
+            a = a.split(' ')
+            b = authn_req['scope']
+            c = list(set(a) & set(b))
+            authn_req['scope'] = c
+        except:
+            logger.debug('Scope Comparison Error')
+        ### rZone Code End ###
+
         context.state[self.name] = {"oidc_request": request}
         hash_type = oidc_subject_type_to_hash_type(self.provider.clients[client_id].get("subject_type", "pairwise"))
         client_name = self.provider.clients[client_id].get("client_name")
@@ -303,6 +325,7 @@ class OpenIDConnectFrontend(FrontendModule):
         internal_req.approved_attributes = self.converter.to_internal_filter(
             "openid", self._get_approved_attributes(self.provider.configuration_information["claims_supported"],
                                                     authn_req))
+        
         return internal_req
 
     def handle_authn_request(self, context):
@@ -317,6 +340,11 @@ class OpenIDConnectFrontend(FrontendModule):
         internal_req = self._handle_authn_request(context)
         if not isinstance(internal_req, InternalRequest):
             return internal_req
+        
+        ### rZone Code Start ###
+        self.internal_req = internal_req
+        ### rZone Code End ###
+
         return self.auth_req_callback_func(context, internal_req)
 
     def jwks(self, context):
@@ -340,6 +368,7 @@ class OpenIDConnectFrontend(FrontendModule):
         :return: HTTP response to the client
         """
         headers = {"Authorization": context.request_authorization}
+
         try:
             response = self.provider.handle_token_request(urlencode(context.request), headers)
             return Response(response.to_json(), content="application/json")
@@ -356,9 +385,10 @@ class OpenIDConnectFrontend(FrontendModule):
 
     def userinfo_endpoint(self, context):
         headers = {"Authorization": context.request_authorization}
-
+        
         try:
-            response = self.provider.handle_userinfo_request(urlencode(context.request), headers)
+            response = self.provider.handle_userinfo_request(urlencode(context.request), headers) 
+           
             return Response(response.to_json(), content="application/json")
         except (BearerTokenError, InvalidAccessToken) as e:
             error_resp = UserInfoErrorResponse(error='invalid_token', error_description=str(e))

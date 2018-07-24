@@ -158,7 +158,7 @@ class OpenIDConnectBackend(BackendModule):
     def _get_userinfo(self, state, context):
         kwargs = {"method": self.config["client"].get("userinfo_request_method", "POST")}
         userinfo_resp = self.client.do_user_info_request(state=state, **kwargs)
-        self._check_error_response(userinfo_resp, context)
+        self._check_error_response(userinfo_resp, context) 
         return userinfo_resp.to_dict()
 
     def response_endpoint(self, context, *args):

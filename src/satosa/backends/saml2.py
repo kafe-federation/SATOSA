@@ -6,7 +6,7 @@ import functools
 import json
 import logging
 from base64 import urlsafe_b64encode, urlsafe_b64decode
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from saml2.client_base import Base
 from saml2.config import SPConfig
@@ -16,8 +16,6 @@ from saml2.authn_context import requested_authn_context
 
 import satosa.util as util
 from satosa.base import SAMLBaseModule
-from satosa.base import SAMLEIDASBaseModule
-from satosa.context import Context
 from .base import BackendModule
 from ..exception import SATOSAAuthenticationError
 from ..internal_data import (InternalResponse,
@@ -27,6 +25,10 @@ from ..metadata_creation.description import (MetadataDescription, OrganizationDe
                                              ContactPersonDesc, UIInfoDesc)
 from ..response import SeeOther, Response
 from ..saml_util import make_saml_response
+
+### rZone Code Start ###
+from pyop.storage import MongoWrapper
+### rZone Code End ###
 
 
 logger = logging.getLogger(__name__)
@@ -88,18 +90,25 @@ class SAMLBackend(BackendModule, SAMLBaseModule):
         :rtype: satosa.response.Response
         """
 
+        ### rZone Code Start ###
+        self.requested_claims = internal_req.approved_attributes
+        self.internal_req = internal_req 
+        ### rZone Code End ###
+
         # if there is only one IdP in the metadata, bypass the discovery service
         idps = self.sp.metadata.identity_providers()
         if len(idps) == 1 and "mdq" not in self.config["sp_config"]["metadata"]:
             return self.authn_request(context, idps[0])
 
-        entity_id = context.get_decoration(
-                Context.KEY_MIRROR_TARGET_ENTITYID)
-        if None is entity_id:
+        try:
+            # find mirrored entity id
+            entity_id = context.internal_data["mirror.target_entity_id"]
+        except KeyError:
+            # redirect to discovery server
             return self.disco_query()
-
-        entity_id = urlsafe_b64decode(entity_id).decode("utf-8")
-        return self.authn_request(context, entity_id)
+        else:
+            entity_id = urlsafe_b64decode(entity_id).decode("utf-8")
+            return self.authn_request(context, entity_id)
 
     def disco_query(self):
         """
@@ -166,19 +175,15 @@ class SAMLBackend(BackendModule, SAMLBaseModule):
             kwargs['requested_authn_context'] = authn_context
 
         try:
-            binding, destination = self.sp.pick_binding(
-                "single_sign_on_service", None, "idpsso", entity_id=entity_id)
-            satosa_logging(logger, logging.DEBUG, "binding: %s, destination: %s" % (binding, destination),
-                           context.state)
+            binding, destination = self.sp.pick_binding("single_sign_on_service", None, "idpsso", entity_id=entity_id)
+            satosa_logging(logger, logging.DEBUG, "binding: %s, destination: %s" % (binding, destination), context.state)
             acs_endp, response_binding = self.sp.config.getattr("endpoints", "sp")["assertion_consumer_service"][0]
-            req_id, req = self.sp.create_authn_request(
-                destination, binding=response_binding, **kwargs)
+            req_id, req = self.sp.create_authn_request(destination, binding=response_binding, **kwargs)
             relay_state = util.rndstr()
             ht_args = self.sp.apply_binding(binding, "%s" % req, destination, relay_state=relay_state)
             satosa_logging(logger, logging.DEBUG, "ht_args: %s" % ht_args, context.state)
         except Exception as exc:
-            satosa_logging(logger, logging.DEBUG, "Failed to construct the AuthnRequest for state", context.state,
-                           exc_info=True)
+            satosa_logging(logger, logging.DEBUG, "Failed to construct the AuthnRequest for state", context.state, exc_info=True)
             raise SATOSAAuthenticationError(context.state, "Failed to construct the AuthnRequest") from exc
 
         if self.sp.config.getattr('allow_unsolicited', 'sp') is False:
@@ -189,6 +194,34 @@ class SAMLBackend(BackendModule, SAMLBaseModule):
             self.outstanding_queries[req_id] = req
 
         context.state[self.name] = {"relay_state": relay_state}
+
+        ### rZone Code Start ###
+        requested_attributes = []
+        for claim_name in self.requested_claims:
+            if claim_name in self.internal_attributes['attributes']:
+                if 'saml' in self.internal_attributes['attributes'][claim_name]:
+                    for saml_attr in self.internal_attributes['attributes'][claim_name]['saml']:
+                        requested_attributes.append(saml_attr)
+
+        db_uri = self.config.get("db_uri")
+
+        if db_uri:
+            consent_db = MongoWrapper(db_uri, "satosa", "consents")
+            consent_info = {}
+            consent_info['relay_state'] = relay_state
+            consent_info['requester'] = self.internal_req.requester 
+            consent_info['requested_attributes'] = requested_attributes 
+            consent_db[relay_state] = consent_info
+
+        '''
+        logger.info('======= proin:satosa:samlbackend =========')
+        logger.info('proin:satosa:samlbackend:attribute ' + str(requested_attributes))
+        logger.info('proin:satosa:samlbackend:requester ' + self.internal_req.requester)
+        logger.info('proin:satosa:samlbackend:requester_name ' + self.internal_req.requester_name[0]['text'])
+        logger.info('proin:satosa:samlbackend:relay ' + relay_state)
+        '''
+         ### rZone Code End ###
+
         return make_saml_response(binding, ht_args)
 
     def authn_response(self, context, binding):
@@ -229,7 +262,11 @@ class SAMLBackend(BackendModule, SAMLBaseModule):
                            "State did not match relay state for state", context.state)
             raise SATOSAAuthenticationError(context.state, "State did not match relay state")
 
-        context.decorate(Context.KEY_BACKEND_METADATA_STORE, self.sp.metadata)
+
+        db_uri = self.config.get("db_uri")
+        if db_uri:
+            consent_db = MongoWrapper(db_uri, "satosa", "consents")
+            consent_db.pop(context.state[self.name]['relay_state'], None)
 
         del context.state[self.name]
         return self.auth_callback_func(context, self._translate_response(authn_response, context.state))
@@ -279,6 +316,7 @@ class SAMLBackend(BackendModule, SAMLBaseModule):
 
         internal_resp.user_id = response.get_subject().text
         internal_resp.attributes = self.converter.to_internal(self.attribute_profile, response.ava)
+        logger.info(internal_resp.attributes)
 
         # The SAML response may not include a NameID
         try:
@@ -388,36 +426,6 @@ class SAMLBackend(BackendModule, SAMLBaseModule):
             entity_descriptions.append(description)
         return entity_descriptions
 
-
-class SAMLEIDASBackend(SAMLBackend, SAMLEIDASBaseModule):
-    """
-    A saml2 eidas backend module (acting as a SP).
-    """
-    VALUE_ACR_CLASS_REF_DEFAULT = 'http://eidas.europa.eu/LoA/high'
-    VALUE_ACR_COMPARISON_DEFAULT = 'minimum'
-
-    def init_config(self, config):
-        config = super().init_config(config)
-
-        spec_eidas_sp = {
-            'acr_mapping': {
-                "": {
-                    'class_ref': self.VALUE_ACR_CLASS_REF_DEFAULT,
-                    'comparison': self.VALUE_ACR_COMPARISON_DEFAULT,
-                },
-            },
-            'sp_config.service.sp.authn_requests_signed': True,
-            'sp_config.service.sp.want_response_signed': True,
-            'sp_config.service.sp.allow_unsolicited': False,
-            'sp_config.service.sp.force_authn': True,
-            'sp_config.service.sp.hide_assertion_consumer_service': True,
-            'sp_config.service.sp.sp_type': ['private', 'public'],
-            'sp_config.service.sp.sp_type_in_metadata': [True, False],
-        }
-
-        return util.check_set_dict_defaults(config, spec_eidas_sp)
-
-
 class SAMLInternalResponse(InternalResponse):
     """
     Like the parent InternalResponse, holds internal representation of
@@ -445,3 +453,4 @@ class SAMLInternalResponse(InternalResponse):
             _dict['name_id'] = None
 
         return _dict
+

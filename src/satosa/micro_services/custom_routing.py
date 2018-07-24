@@ -1,8 +1,6 @@
 import logging
 from base64 import urlsafe_b64encode
 
-from satosa.context import Context
-
 from .base import RequestMicroService
 from ..exception import SATOSAConfigurationError
 from ..exception import SATOSAError
@@ -58,9 +56,9 @@ class DecideIfRequesterIsAllowed(RequestMicroService):
         return urlsafe_b64encode(data.encode("utf-8")).decode("utf-8")
 
     def process(self, context, data):
-        target_entity_id = context.get_decoration(
-                Context.KEY_MIRROR_TARGET_ENTITYID)
-        if None is target_entity_id:
+        try:
+            target_entity_id = context.internal_data["mirror.target_entity_id"]
+        except KeyError:
             logger.error("DecideIfRequesterIsAllowed can only be used with SAMLMirrorFrontend")
             raise SATOSAError("DecideIfRequesterIsAllowed can only be used with SAMLMirrorFrontend")
 

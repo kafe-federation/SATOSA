@@ -1,3 +1,6 @@
+"""
+Holds methods for sending internal data through the satosa proxy
+"""
 from .exception import SATOSAError
 
 
@@ -8,15 +11,10 @@ class SATOSABadContextError(SATOSAError):
     pass
 
 
-"""
-Holds methods for sending internal data through the satosa proxy
-"""
 class Context(object):
     """
     Holds information about the current request.
     """
-    KEY_BACKEND_METADATA_STORE = 'metadata_store'
-    KEY_MIRROR_TARGET_ENTITYID = 'mirror_target_entity_id'
 
     def __init__(self):
         self._path = None
@@ -62,19 +60,3 @@ class Context(object):
         elif p.startswith('/'):
             raise ValueError("path can't start with '/'")
         self._path = p
-
-    def decorate(self, key, value):
-        """
-        Add information to the context
-        """
-
-        self.internal_data[key] = value
-        return self
-
-    def get_decoration(self, key):
-        """
-        Retrieve information from the context
-        """
-
-        value = self.internal_data.get(key)
-        return value

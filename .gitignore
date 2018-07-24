@@ -16,3 +16,6 @@ example/*
 build/
 dist/
 .coverage
+
+*.swo
+*.swp

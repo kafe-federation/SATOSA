@@ -33,6 +33,8 @@ class AttributeMapper(object):
         self.separator = "."  # separator for nested attribute values, e.g. address.street_address
         self.multivalue_separator = ";"  # separates multiple values, e.g. when using templates
         self.from_internal_attributes = internal_attributes["attributes"]
+#        logger.info(self.from_internal_attributes["attributes"][address])
+#        logger.info(self.from_internal_attributes[1])
         self.template_attributes = internal_attributes.get("template_attributes", None)
 
         self.to_internal_attributes = defaultdict(dict)
@@ -85,31 +87,46 @@ class AttributeMapper(object):
         :return: Attributes in the internal format
         """
         internal_dict = {}
+        # external_dict => response message attr
+        logger.info("ext dict: " + str(external_dict))
 
         for internal_attribute_name, mapping in self.from_internal_attributes.items():
+            # By Heejin
+            logger.info("---------------------------------------------------------")
+            logger.info("name: " + internal_attribute_name)
+            # profile = saml
+            logger.info("profile: " + attribute_profile)
             if attribute_profile not in mapping:
                 logger.debug("no attribute mapping found for internal attribute '%s' the attribute profile '%s'" % (
                     internal_attribute_name, attribute_profile))
                 # skip this internal attribute if we have no mapping in the specified profile
                 continue
 
+            # external_attr_name => saml attr name in yaml
             external_attribute_name = mapping[attribute_profile]
+            logger.info("ext_name: " + str(external_attribute_name))
             attribute_values = self._collate_attribute_values_by_priority_order(external_attribute_name,
                                                                                 external_dict)
+            logger.info("value: " + str(attribute_values))
             if attribute_values:  # Only insert key if it has some values
                 logger.debug("backend attribute '%s' mapped to %s" % (external_attribute_name,
                                                             internal_attribute_name))
                 internal_dict[internal_attribute_name] = attribute_values
             else:
                 logger.debug("skipped backend attribute '%s': no value found", external_attribute_name)
+            logger.info("---------------------------------------------------------")
 
         internal_dict = self._handle_template_attributes(attribute_profile, internal_dict)
         return internal_dict
 
+    # per each attribute
     def _collate_attribute_values_by_priority_order(self, attribute_names, data):
         result = []
+        # per each name
         for attr_name in attribute_names:
+            logger.info("attr_name: " + str(attr_name))
             attr_val = self._get_nested_attribute_value(attr_name, data)
+            logger.info("attr_val: " + str(attr_val))
 
             if isinstance(attr_val, list):
                 result.extend(attr_val)
@@ -145,10 +162,15 @@ class AttributeMapper(object):
 
         return internal_dict
 
+    # nested_key = 1 attr - 1 name, data = response msg
     def _get_nested_attribute_value(self, nested_key, data):
         keys = nested_key.split(self.separator)
 
         d = data
+
+        logger.info("keys: " + str(keys))
+        logger.info("d: " + str(d))
+
         for key in keys:
             d = d.get(key)
             if d is None:
